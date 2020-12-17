@@ -3,6 +3,9 @@
       MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
       GNU General Public License for more details. */
 #include <ESP8266WiFi.h>
+#include <ESP8266WiFiMulti.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecureBearSSL.h>
 #include <time.h>
 #include <coredecls.h>
 #include <SparkFun_SCD30_Arduino_Library.h>
@@ -177,7 +180,7 @@ void serverHomepage() {
    } else
       cal_message = "wrong password";
  } else cal_message = "";
-	 server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+   server.setContentLength(CONTENT_LENGTH_UNKNOWN);
  server.send ( 200, "text/html", INDEX_HTML_START);
  serverSendFigure();             // Ampel integrieren
  server.sendContent(PSTR("<p><a href=\"/?backlight-on\">Beleuchtung an</a>  <a href=\"/?backlight-off\">Beleuchtung aus</a>  <a href=\"/?lcd-init\">LCD INIT</a>"));
@@ -190,40 +193,36 @@ void serverHomepage() {
  server.sendContent(INDEX_HTML_END);
 }
 //--------------------------------------- HTTP-Get
-int httpGET(String host, String cmd, String &antwort,int Port) {
-  WiFiClient client; // Client über WiFi
-  //Serial.println("CMD: " + cmd + " time:" + String(currReading)); 
-  String text = PSTR("GET http://")+ host + cmd + PSTR(" HTTP/1.1\r\n")
-    + PSTR("Host:") + host + PSTR("\r\n");
-    + PSTR("Connection:close\r\n\r\n");
-  Serial.printf("HOST %s, cmd: %s", host.c_str(), cmd.c_str());
-  int ok = 1;
-  if (ok) { // Netzwerkzugang vorhanden 
-    ok = client.connect(host.c_str(),Port);// verbinde mit Client
-  Serial.printf(" nach connect: %d\n", ok);
-    if (ok) {
-      client.print(text);                 // sende an Client 
-      for (int tout=1000;tout>0 && client.available()==0; tout--) {
-        doIdleTasks();
-        delay(25);                         // und warte auf Antwort
-      }
-      int oo;
-      if ((oo = client.available()) > 0)  {        // Anwort gesehen 
-        while (client.available())         // und ausgewertet
-          antwort = antwort + client.readStringUntil('\r');
-      }  else {
-        ok = 0;
-  Serial.printf("client availabe %d ", oo);
-      }
+int httpGET(String host, String cmd, String &antwort, int Port) {
+  //std::unique_ptr<BearSSL::WiFiClientSecure>client(new BearSSL::WiFiClientSecure);
+  HTTPClient http;
 
-      client.stop(); 
-      //Serial.println(antwort);
-    } 
+  String url = PSTR("http://")+ host + cmd;
+  Serial.print("[HTTP] begin...\n");
+  if (http.begin(url)) {  // HTTP
+    Serial.print("[HTTP] GET...\n");
+    // start connection and send HTTP header
+    int httpCode = http.GET();
+
+    // httpCode will be negative on error
+    if (httpCode > 0) {
+      // HTTP header has been send and Server response header has been handled
+      Serial.printf("[HTTP] GET... code: %d\n", httpCode);
+
+      // file found at server
+      if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY) {
+        String payload = http.getString();
+        Serial.println(payload);
+      }
+    } else {
+      Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
+    }
+
+    http.end();
   } else {
-       Serial.print(PSTR(" no connection at initial stage\n")); 
+     Serial.printf("[HTTP} Unable to connect\n");
   }
-  if (!ok) Serial.print(PSTR("HTTP no connection")); // Fehlermeldung
-  return ok;
+  return 1;
 }
 
 
@@ -310,8 +309,8 @@ wifiConnect(void) {
  */
 void
 doIdleTasks(void) {
-    wifiConnect();
-    server.handleClient(); //Homepageanfragen versorgen
+  wifiConnect();
+  server.handleClient(); //Homepageanfragen versorgen
 }
 
 void setup(){ // Einmalige Initialisierung
@@ -360,7 +359,9 @@ void setup(){ // Einmalige Initialisierung
    Serial.println("time pre ntp: " +String(time(NULL)));
    settimeofday_cb(NTPtime_is_set);
    int tout = 100;
-   while ((tout > 0) && (!NTPtimeset)) {tout--;delay(100);}
+   while ((tout > 0) && time(NULL) < 1000 && (!NTPtimeset)) {
+    tout--;delay(100);
+   }
    if (tout <=0) {
     lcd.setCursor(0,0);
     lcd.print("NO NTP!!!");
