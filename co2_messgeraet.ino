@@ -23,7 +23,9 @@ LiquidCrystal_I2C lcd(0x27,16,2);  // set the LCD address to 0x27 for a 20 chars
 #define DISP_REINIT_INTERVAL 300 // 5 Minuten
 #define TEMP_CORRECTION (-2.5) // try to work around heat source at tempReading sensor
 #define DEFAULT_WIFI_CONNECT_TIMEOUT 1000
+int16_t showLED = 1;
 
+#define DEBUG_HTTPCLIENT(fmt, ...) Serial.printf(fmt, ## __VA_ARGS__ )
 const PROGMEM char *serialNumber = "ADCO2000001";
 const PROGMEM char *APIkey = "jhsdfz-zz656j-878912jh-ddsdf";
 const PROGMEM char *szWifiSSID = "FRITZ!Box Fon WLAN 7390";
@@ -194,15 +196,25 @@ void serverHomepage() {
 }
 //--------------------------------------- HTTP-Get
 int httpGET(String host, String cmd, String &antwort, int Port) {
-  //std::unique_ptr<BearSSL::WiFiClientSecure>client(new BearSSL::WiFiClientSecure);
+  std::unique_ptr<BearSSL::WiFiClientSecure>client(new BearSSL::WiFiClientSecure);
+  //BearSSL::WiFiClientSecure client;
   HTTPClient http;
 
-  String url = PSTR("http://")+ host + cmd;
-  Serial.print("[HTTP] begin...\n");
-  if (http.begin(url)) {  // HTTP
+  String url = PSTR("https://")+ host + cmd;
+  //String url = PSTR("http://")+ host + cmd;
+  Serial.printf("[HTTP] begin... %s\n", url.c_str());
+  client->setInsecure();
+  if (http.begin(*client, url)) {  // HTTP
+    http.setTimeout(10000);
+  //if (http.begin(url)) {  // HTTP
     Serial.print("[HTTP] GET...\n");
+
+    // ensure as much "watchdog time" as possible
+    system_soft_wdt_restart();
+    
     // start connection and send HTTP header
     int httpCode = http.GET();
+    yield();
 
     // httpCode will be negative on error
     if (httpCode > 0) {
@@ -217,6 +229,7 @@ int httpGET(String host, String cmd, String &antwort, int Port) {
     } else {
       Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
     }
+    yield();
 
     http.end();
   } else {
@@ -226,10 +239,10 @@ int httpGET(String host, String cmd, String &antwort, int Port) {
 }
 
 
-Adafruit_NeoPixel WSpixels = Adafruit_NeoPixel((3<24)?3:24,15,NEO_GRB + NEO_KHZ800); //14 ist korrekt
+Adafruit_NeoPixel WSpixels = Adafruit_NeoPixel((3<24)?3:24,14,NEO_GRB + NEO_KHZ800); //14 ist korrekt
 //--------- Neopixel Messanzeige (Gauge)
 void WSGauge(float val, float limit1, float limit2, float delta, int seg, int dir){
-  int bright = 32;
+  int bright = 2;
   float current = 0;
   int i;
   for (int k=0;k<=(seg-1);k++) { // alle Pixel
@@ -247,6 +260,35 @@ void WSGauge(float val, float limit1, float limit2, float delta, int seg, int di
   WSpixels.show(); // Anzeige
 }
 
+//--------- Neopixel Messanzeige (Gauge)
+void showleds(void) {
+  int bright = 2;
+  float current = 0;
+  int nled = 0;
+  int r,g,b;
+
+  if (co2 <= 800) {
+      r = g = b = 0;
+      nled = 0;
+  } else if (co2 <= 1200) {
+    r = bright;
+    g = bright * 2 / 3;
+    b = 0;
+    nled = 1;
+  } else {
+     r = bright;
+     g = b = 0;
+     nled = 2;
+  }
+  
+  for(int i = 0 ; i < 3 ; ++i)
+    WSpixels.setPixelColor(i,0,0,0);
+  for(int i = 0 ; i < nled ; ++i) {
+    WSpixels.setPixelColor(i,r,g,b);
+  }
+  
+  WSpixels.show(); // Anzeige
+}
 
 void
 wifiConnect(void) {
@@ -260,6 +302,11 @@ wifiConnect(void) {
       Serial.printf_P(PSTR("loop: WIFI Succcessfully connected to '%s', IP Address is: %s\n"),
         WiFi.SSID().c_str(), 
         WiFi.localIP().toString().c_str());
+      String antwort;
+      httpGET(PSTR("co2.rainer-gerhards.de"), PSTR("/tools/co2_sensor_reconnect.php?sn=") + String(serialNumber)
+        + String("&ip=" )+ WiFi.localIP().toString(), antwort, 80);
+
+      httpGET(PSTR("co2.rainer-gerhards.de"), PSTR("/tools/co2_sensor_reconnect.php?IP=")+ WiFi.localIP().toString(), antwort,80 );
 
         /* (RE-)CONNECTED */
     }
@@ -340,6 +387,7 @@ void setup(){ // Einmalige Initialisierung
   lcd.print(PSTR("Connect to WLAN"));
   Serial.print(PSTR("\nWLAN connect to:"));
   Serial.print("FRITZ!Box Fon WLAN 7390");
+          WiFi.disconnect(true);
   while(WiFi.status() != WL_CONNECTED) {
     wifiConnect();
     Serial.print(".");
@@ -386,12 +434,13 @@ void setup(){ // Einmalige Initialisierung
 
 
 
+/* IMPORTANT: message must be URL encoded */
 void
-doReset(void) {
+doReset(const char *message) {
   static void(*reset)(void) = 0;
   Serial.println(PSTR("FORCING RESET"));
   String antwort;
-  httpGET(PSTR("co2.rainer-gerhards.de"), PSTR("/tools/co2_sensor_log.php?msg=REBOOT+(stalled)"), antwort,80 );
+  httpGET(PSTR("co2.rainer-gerhards.de"), PSTR("/tools/co2_sensor_log.php?msg=") + String(message), antwort,80 );
   reset();
 }
 
@@ -407,11 +456,18 @@ void loop() { // Kontinuierliche Wiederholung
 
   if(!airSensorSCD30.dataAvailable()) {
     Serial.print(PSTR("Wait for sensor data "));
-    while(airSensorSCD30.dataAvailable()) {
+    time_t t_to = time(NULL) + 5;
+    while(!airSensorSCD30.dataAvailable()) {
       lcd.setCursor(12,1);
+      doIdleTasks();
       lcd.print(PSTR("WCO2"));
-      Serial.print('.');
-      delay(100);
+      if((millis() % 50) == 0)
+        Serial.print('.');
+      if(time(NULL) > t_to) {
+        Serial.println("Sensor Timeout, reboot");
+        doReset(PSTR("REBOOT+(CO2+sensor+stalled)"));
+      }
+      delay(1);
     }
     Serial.print(PSTR(" got it! - "));
     lcd.setCursor(12,1);
@@ -436,7 +492,7 @@ void loop() { // Kontinuierliche Wiederholung
     
   if(tempReading == lastTempReading) {
     if(currReading >= lastReading + 120) {
-      doReset();
+      doReset(PSTR("REBOOT+(stalled)"));
     }
   } else {
     lastTempReading = tempReading;
@@ -468,8 +524,12 @@ void loop() { // Kontinuierliche Wiederholung
   /*if (doCal) {
      CO2_Kalibrierfunktion(); // Kalibrierfunktion aufrufen 
      doCal=0; 
-  }  WSGauge(airSensorSCD30.getCO2(),1000,2000,100,10,true);
+  }  
   */
+  if (showLED) {
+    showleds();
+    //WSGauge(co2,800, 1200,100,10,true);
+  }
   lcd.setCursor(0,0);
   lcd.print(String("CO2:"+String(co2))+"                ");
   lcd.setCursor(0,1);
@@ -501,6 +561,7 @@ void loop() { // Kontinuierliche Wiederholung
       + PSTR("&at=4711"), antwort,80 );
     lcd.setCursor(12,1);
     lcd.print(PSTR("    "));
+    Serial.println(PSTR("reported sensor data to server"));  
   }
 
   //ensure one second later
