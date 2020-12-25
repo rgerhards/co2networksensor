@@ -12,7 +12,7 @@
 #include <SparkFun_SCD30_Arduino_Library.h>
 #include <Wire.h>
 #include <ESP8266WebServer.h>
-#include <Adafruit_NeoPixel.h>
+//#include <Adafruit_NeoPixel.h>
 #if GROVE_LCD == 1
   #include <rgb_lcd.h>
 #else
@@ -22,11 +22,12 @@
 using namespace std;
 
 #include "bootinfo.h"
+#include "secure.h"
 
 //LCD RGB, 2013 Copyright (c) Seeed Technology Inc.   Author:Loovee
 #if GROVE_LCD == 1
   rgb_lcd lcd;
-#else #include <Wire.h>
+#else
   LiquidCrystal_I2C lcd(0x27,16,2);  // set the LCD address to 0x27 for a 20 chars and 4 line display
 #endif
 
@@ -36,15 +37,18 @@ using namespace std;
 #define DEFAULT_WIFI_CONNECT_TIMEOUT 1000
 int16_t showLED = 1;
 
-const int red_led = 12;
-const int yellow_led = 14;
-const int green_led = 13;
+uint8_t reportingInterval = 20;
+uint8_t measurementInterval = 2; // 2sec is default and should be changed with caution
+const int red_led = 14;
+const int yellow_led = 13;
+const int green_led = 12;
 
 #define DEBUG_HTTPCLIENT(fmt, ...) Serial.printf(fmt, ## __VA_ARGS__ )
 const PROGMEM char *serialNumber = "ADCO2000001";
 const PROGMEM char *APIkey = "jhsdfz-zz656j-878912jh-ddsdf";
-const PROGMEM char *szWifiSSID = "FRITZ!Box Fon WLAN 7390";
-const PROGMEM char *szWifiPassword = "4697223942214470";
+const PROGMEM char *szWifiSSID = WIFI_SSID;
+const PROGMEM char *szWifiPassword = WIFI_KEY;
+const PROGMEM char *co2server = CO2SERVER;
 
 IPAddress myOwnIP; // ownIP for mDNS 
 static time_t currReading = 0;
@@ -197,9 +201,9 @@ void serverHomepage() {
     Serial.println("backlight off");
 #if GROVE_LCD == 0
 #else
-    lcd.setPWM(REG_RED,0);
-    lcd.setPWM(REG_GREEN,0);
-    lcd.setPWM(REG_BLUE,0);
+    //lcd.setPWM(REG_RED,0);
+    //lcd.setPWM(REG_GREEN,0);
+    //lcd.setPWM(REG_BLUE,0);
     //lcd.noDisplay();
 #endif
   }
@@ -272,7 +276,7 @@ int httpGET(String host, String cmd, String &antwort, int Port) {
   return 1;
 }
 
-
+#if 0
 Adafruit_NeoPixel WSpixels = Adafruit_NeoPixel((3<24)?3:24,15,NEO_GRB + NEO_KHZ800); //14 ist korrekt
 
 //--------- Neopixel Messanzeige (Gauge)
@@ -304,6 +308,7 @@ void showleds(void) {
   
   WSpixels.show(); // Anzeige
 }
+#endif
 
 void
 wifiConnect(void) {
@@ -318,10 +323,10 @@ wifiConnect(void) {
         WiFi.SSID().c_str(), 
         WiFi.localIP().toString().c_str());
       String antwort;
-      httpGET(PSTR("co2.rainer-gerhards.de"), PSTR("/tools/co2_sensor_reconnect.php?sn=") + String(serialNumber)
+      httpGET(co2server, PSTR("/tools/co2_sensor_reconnect.php?sn=") + String(serialNumber)
         + String("&ip=" )+ WiFi.localIP().toString(), antwort, 80);
 
-      httpGET(PSTR("co2.rainer-gerhards.de"), PSTR("/tools/co2_sensor_reconnect.php?IP=")+ WiFi.localIP().toString(), antwort,80 );
+      httpGET(co2server, PSTR("/tools/co2_sensor_reconnect.php?IP=")+ WiFi.localIP().toString(), antwort,80 );
 
         /* (RE-)CONNECTED */
     }
@@ -390,19 +395,13 @@ void Calibrate_code_Sample(void) {
       airSensorSCD30.setForcedRecalibrationFactor(400); // fresh air 
       Serial.println(PSTR(" done"));
       }
-  }
-  
-  /*if (doCal) {
-     CO2_Kalibrierfunktion(); // Kalibrierfunktion aufrufen 
-     doCal=0; 
   }  
-  */  
 }
 
 
 void reportReading(void) {
   if(time(NULL) >= nextReporting) {
-    nextReporting += 30;
+    nextReporting += reportingInterval;
     uint16_t co2Median = co2;
 
         Serial.printf("reporting %d readings: ", iReadings);
@@ -434,7 +433,7 @@ void reportReading(void) {
     lcd.print(PSTR("WEB "));
     
     String antwort;
-    httpGET(PSTR("co2.rainer-gerhards.de"), PSTR("/tools/co2_accept.php?messung=")
+    httpGET(co2server, PSTR("/tools/co2_accept.php?messung=")
       + String(idMessung) + "&co2="
       + String(co2Median)
       + PSTR("&tm=") + String(currReading)
@@ -449,7 +448,7 @@ void reportReading(void) {
 
 void showLEDs(void) {
   if (showLED) {
-    if(co2 > 120) {
+    if(co2 > 1200) {
           digitalWrite(red_led, HIGH);
           digitalWrite(yellow_led, LOW);
           digitalWrite(green_led, LOW);
@@ -483,11 +482,11 @@ void setup(){ // Einmalige Initialisierung
   
   airSensorSCD30.setAutoSelfCalibration(false); // Sensirion no auto calibration
   airSensorSCD30.setAltitudeCompensation(300); // Altitude in m ü NN   
-  airSensorSCD30.setMeasurementInterval(2);     // CO2-Messung alle 5 s
+  airSensorSCD30.setMeasurementInterval(measurementInterval);     // CO2-Messung alle 5 s
   //------------ HTML-Server initialisieren
   server.on("/", serverHomepage);
   server.begin();// Server starten
-  WSpixels.begin();//-------------- Initialisierung Neopixel
+//  WSpixels.begin();//-------------- Initialisierung Neopixel
   
   #if GROVE_LCD == 0
   lcd.init();                      // initialize the lcd
@@ -505,10 +504,8 @@ void setup(){ // Einmalige Initialisierung
  
   lcd.setCursor(0,0);
   Serial.printf_P(PSTR("MAC address %s, idMessung %d\n"), macAddress.c_str(), idMessung);
-  lcd.print(PSTR("Connect to WLAN"));
-  Serial.print(PSTR("\nWLAN connect to:"));
-  Serial.print("FRITZ!Box Fon WLAN 7390");
-          WiFi.disconnect(true);
+  lcd.print(PSTR("Connect to WiFI "));
+  WiFi.disconnect(true);
   while(WiFi.status() != WL_CONNECTED) {
     wifiConnect();
     Serial.print(".");
@@ -545,7 +542,7 @@ void setup(){ // Einmalige Initialisierung
   String antwort;
   //rst_info* rinfo = ESP.getResetInfoPtr();
   struct bootflags bflags = bootmode_detect();
-  httpGET(PSTR("co2.rainer-gerhards.de"), PSTR("/tools/co2_sensor_boot.php?sn=") + String(serialNumber)
+  httpGET(co2server, PSTR("/tools/co2_sensor_boot.php?sn=") + String(serialNumber)
     + String("&ip=" )+ WiFi.localIP().toString() 
     + String("&rstcause=" ) + String(bflags.raw_rst_cause), 
     antwort, 80);
@@ -554,7 +551,7 @@ void setup(){ // Einmalige Initialisierung
   lcd.noBacklight();
   #endif
   time_t curr = time(NULL);
-  nextReporting = curr - curr % 30 + 30; // TODO: +60
+  nextReporting = curr - curr % reportingInterval + reportingInterval;
 }
 
 
@@ -565,7 +562,7 @@ doReset(const char *message) {
   static void(*reset)(void) = 0;
   Serial.println(PSTR("FORCING RESET"));
   String antwort;
-  httpGET(PSTR("co2.rainer-gerhards.de"), PSTR("/tools/co2_sensor_log.php?msg=") + String(message), antwort,80 );
+  httpGET(co2server, PSTR("/tools/co2_sensor_log.php?msg=") + String(message), antwort,80 );
   reset();
 }
 
@@ -631,13 +628,10 @@ static void readCO2(void) {
   lcd.print(String(nextReporting - time(NULL)) + " ");
   
   Serial.println("CO2="+String(String(co2)));
-  showLEDs();
   lcd.setCursor(0,0);
   lcd.print(String("CO2:"+String(co2))+"                ");
   lcd.setCursor(0,1);
   lcd.print(String(PSTR("C:")+String(tempReading)+"     ")); // +String(NTPtime()))+"                ");
-
-  reportReading();
 }
 
 
@@ -653,5 +647,9 @@ void loop() { // Kontinuierliche Wiederholung
 
     reportReading();
   }
-  server.handleClient(); //Homepageanfragen versorgen
+  server.handleClient();
+  if(doCal) {
+     CO2_Kalibrierfunktion();
+     doCal=0; 
+  }
 }
