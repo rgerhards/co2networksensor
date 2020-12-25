@@ -2,6 +2,7 @@
       but WITHOUT ANY WARRANTY; without even the implied warranty of
       MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
       GNU General Public License for more details. */
+#define GROVE_LCD 1
 #include <ESP8266WiFi.h>
 #include <ESP8266WiFiMulti.h>
 #include <ESP8266HTTPClient.h>
@@ -12,18 +13,32 @@
 #include <Wire.h>
 #include <ESP8266WebServer.h>
 #include <Adafruit_NeoPixel.h>
-#include <LiquidCrystal_I2C.h>
+#if GROVE_LCD == 1
+  #include <rgb_lcd.h>
+#else
+  #include <LiquidCrystal_I2C.h>
+#endif
 #include <bits/stdc++.h>
 using namespace std;
 
-//LCD RGB, 2013 Copyright (c) Seeed Technology Inc.   Author:Loovee
-LiquidCrystal_I2C lcd(0x27,16,2);  // set the LCD address to 0x27 for a 20 chars and 4 line display
+#include "bootinfo.h"
 
-#define NUM_READINGS 6
+//LCD RGB, 2013 Copyright (c) Seeed Technology Inc.   Author:Loovee
+#if GROVE_LCD == 1
+  rgb_lcd lcd;
+#else #include <Wire.h>
+  LiquidCrystal_I2C lcd(0x27,16,2);  // set the LCD address to 0x27 for a 20 chars and 4 line display
+#endif
+
+#define NUM_READINGS 15
 #define DISP_REINIT_INTERVAL 300 // 5 Minuten
 #define TEMP_CORRECTION (-2.5) // try to work around heat source at tempReading sensor
 #define DEFAULT_WIFI_CONNECT_TIMEOUT 1000
 int16_t showLED = 1;
+
+const int red_led = 12;
+const int yellow_led = 14;
+const int green_led = 13;
 
 #define DEBUG_HTTPCLIENT(fmt, ...) Serial.printf(fmt, ## __VA_ARGS__ )
 const PROGMEM char *serialNumber = "ADCO2000001";
@@ -40,6 +55,10 @@ uint16_t co2;
 float tempReading;
 float rhReading;
 static uint16_t iReadings;
+time_t nextReporting = 0;
+
+static int idMessung = -1;
+static String macAddress;
 
 /* WiFi Connection handling status vars */
 bool bWifiConnected = false; 
@@ -83,7 +102,8 @@ String SerialReadEndless(String Ausgabe) {
   
   String Antwort = "" ;
   int doCal=0;  // Kalibriermerker
-  void CO2_Kalibrierfunktion(){ // Kalibrierfunktion
+
+void CO2_Kalibrierfunktion(){ // Kalibrierfunktion
   // Forced Calibration Sensirion SCD 30
   Serial.print("Start SCD 30 calibration, please wait 20 s ...");delay(20000);
   airSensorSCD30.setAltitudeCompensation(300); // Altitude in m ü NN 
@@ -167,12 +187,24 @@ void serverSendFigure(){
 //------------------------------ Server Unterprogramm zur Bearbeitung der Anfragen
 void serverHomepage() { 
   if (server.hasArg(PSTR("backlight-on"))) {
+#if GROVE_LCD == 0
     lcd.backlight();
+#else
+    lcd.display();
+#endif
   } else if (server.hasArg(PSTR("backlight-off"))) {
     lcd.noBacklight();
+    Serial.println("backlight off");
+#if GROVE_LCD == 0
+#else
+    lcd.setPWM(REG_RED,0);
+    lcd.setPWM(REG_GREEN,0);
+    lcd.setPWM(REG_BLUE,0);
+    //lcd.noDisplay();
+#endif
   }
   if (server.hasArg(PSTR("lcd-init"))) {
-    lcd.init();
+//    lcd.init();
   }
  if (server.hasArg("message")) {// Wenn Kalibrierpasswort eingetroffen,
    String input = server.arg("message");     // dann Text vom Client einlesen
@@ -197,7 +229,6 @@ void serverHomepage() {
 //--------------------------------------- HTTP-Get
 int httpGET(String host, String cmd, String &antwort, int Port) {
   std::unique_ptr<BearSSL::WiFiClientSecure>client(new BearSSL::WiFiClientSecure);
-  //BearSSL::WiFiClientSecure client;
   HTTPClient http;
 
   String url = PSTR("https://")+ host + cmd;
@@ -231,34 +262,18 @@ int httpGET(String host, String cmd, String &antwort, int Port) {
     }
     yield();
 
+    Serial.print(PSTR("ending connection .. "));
     http.end();
+    Serial.println(PSTR("done"));
   } else {
      Serial.printf("[HTTP} Unable to connect\n");
   }
+  Serial.println("END httpGet");
   return 1;
 }
 
 
-Adafruit_NeoPixel WSpixels = Adafruit_NeoPixel((3<24)?3:24,14,NEO_GRB + NEO_KHZ800); //14 ist korrekt
-//--------- Neopixel Messanzeige (Gauge)
-void WSGauge(float val, float limit1, float limit2, float delta, int seg, int dir){
-  int bright = 2;
-  float current = 0;
-  int i;
-  for (int k=0;k<=(seg-1);k++) { // alle Pixel
-      current = (k+1)*delta;
-      if (dir==1) i=k;else {i=seg-1-k; if (i == seg-1) i=0; else i=i+1;} // clockwise or opposite
-      if ((val>=current) && (val < limit1)) // gruen
-        WSpixels.setPixelColor(i,0,bright,0);
-       else if ((val>=current) && (val <= limit2)) // gelb
-              WSpixels.setPixelColor(i,bright/2,bright/2,0);
-             else if ((val >= current) && (val > limit2)) // rot
-                    WSpixels.setPixelColor(i,bright,0,0);
-                   else
-                    WSpixels.setPixelColor(i,0,0,0);
-  }
-  WSpixels.show(); // Anzeige
-}
+Adafruit_NeoPixel WSpixels = Adafruit_NeoPixel((3<24)?3:24,15,NEO_GRB + NEO_KHZ800); //14 ist korrekt
 
 //--------- Neopixel Messanzeige (Gauge)
 void showleds(void) {
@@ -360,10 +375,105 @@ doIdleTasks(void) {
   server.handleClient(); //Homepageanfragen versorgen
 }
 
+void Calibrate_code_Sample(void) {
+  Serial.print(PSTR("ppm Kalibrieren: Frischluft, Einschwingen abwarten und \"Cal\" eingeben <Return>"));
+  Serial.println();
+  if (( ( Serial.available() ) > ( 1 ) ))
+  {
+    JaNeinAbfrage = "Text" ;
+    Eingabe = SerialReadEndless("Eingabe=") ;
+    if (( ( ( Antwort ) == ( "j" ) ) || ( ( Antwort ) == ( "J" ) ) )){
+      Serial.println("Frischluft kalibriert");
+      // Forced Calibration Sensirion SCD 30
+      Serial.print(PSTR("Start SCD 30 calibration, please wait 20 s ..."));delay(20000);
+      airSensorSCD30.setAltitudeCompensation(300); // Altitude in m ü NN 
+      airSensorSCD30.setForcedRecalibrationFactor(400); // fresh air 
+      Serial.println(PSTR(" done"));
+      }
+  }
+  
+  /*if (doCal) {
+     CO2_Kalibrierfunktion(); // Kalibrierfunktion aufrufen 
+     doCal=0; 
+  }  
+  */  
+}
+
+
+void reportReading(void) {
+  if(time(NULL) >= nextReporting) {
+    nextReporting += 30;
+    uint16_t co2Median = co2;
+
+        Serial.printf("reporting %d readings: ", iReadings);
+        for(int i = 0 ; i < iReadings ; ++i) Serial.printf("%d, ", (int) co2Readings[i]);
+        Serial.println();
+    
+    sort(co2Readings, co2Readings + iReadings);
+
+        Serial.printf("sorted %d readings: ", iReadings);
+        for(int i = 0 ; i < iReadings ; ++i) Serial.printf("%d, ", (int) co2Readings[i]);
+        Serial.println();
+    
+    if(iReadings % 2 == 0) {
+      co2Median = (co2Readings[iReadings/2]+co2Readings[iReadings/2+1]) * 10 / 2;   // even number of readings
+      if(co2Median % 10 >= 5) {
+        co2Median += 10;
+      }
+      co2Median = co2Median / 10;
+    } else {
+      co2Median = co2Readings[iReadings/2];
+    }
+    iReadings = 0;
+
+    Serial.printf("co2median %d\n", co2Median);
+    
+    lcd.setCursor(12,0);
+    lcd.print(String(co2Median));
+    lcd.setCursor(12,1);
+    lcd.print(PSTR("WEB "));
+    
+    String antwort;
+    httpGET(PSTR("co2.rainer-gerhards.de"), PSTR("/tools/co2_accept.php?messung=")
+      + String(idMessung) + "&co2="
+      + String(co2Median)
+      + PSTR("&tm=") + String(currReading)
+      + PSTR("&te=") + String(tempReading)
+      + PSTR("&rh=") + String(rhReading)
+      + PSTR("&at=4711"), antwort,80 );
+
+    lcd.setCursor(12,1);
+    lcd.print(PSTR("    "));
+  }
+}
+
+void showLEDs(void) {
+  if (showLED) {
+    if(co2 > 120) {
+          digitalWrite(red_led, HIGH);
+          digitalWrite(yellow_led, LOW);
+          digitalWrite(green_led, LOW);
+    } else if(co2 > 800) {
+          digitalWrite(red_led, LOW);
+          digitalWrite(yellow_led, HIGH);
+          digitalWrite(green_led, LOW);
+    } else {
+          digitalWrite(red_led, LOW);
+          digitalWrite(yellow_led, LOW);
+          digitalWrite(green_led, HIGH);
+    }
+  }
+}
+
+
 void setup(){ // Einmalige Initialisierung
   Serial.begin(115200);
   setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 0); // set timezone for NTP
-  
+  emit_boot_info();
+  pinMode(red_led, OUTPUT);
+  pinMode(yellow_led, OUTPUT);
+  pinMode(green_led, OUTPUT);
+ 
   Serial.println("INIT");
   Wire.begin(); // ---- Initialisiere den I2C-Bus 
   
@@ -372,18 +482,29 @@ void setup(){ // Einmalige Initialisierung
   if (airSensorSCD30.begin() == false) {Serial.println(PSTR("The SCD30 did not respond. Please check wiring.")); while(1) {yield(); delay(1);} }
   
   airSensorSCD30.setAutoSelfCalibration(false); // Sensirion no auto calibration
-  
-  airSensorSCD30.setMeasurementInterval(5);     // CO2-Messung alle 5 s
+  airSensorSCD30.setAltitudeCompensation(300); // Altitude in m ü NN   
+  airSensorSCD30.setMeasurementInterval(2);     // CO2-Messung alle 5 s
   //------------ HTML-Server initialisieren
   server.on("/", serverHomepage);
   server.begin();// Server starten
   WSpixels.begin();//-------------- Initialisierung Neopixel
   
+  #if GROVE_LCD == 0
   lcd.init();                      // initialize the lcd
   lcd.backlight();
-
+  #else
+    lcd.begin(16,2);
+  #endif
   //------------ WLAN initialisieren 
+  macAddress = WiFi.macAddress();
+  if(macAddress == "A4:CF:12:BF:2A:DE") {
+    idMessung = 1001;
+  } else {
+    
+  }
+ 
   lcd.setCursor(0,0);
+  Serial.printf_P(PSTR("MAC address %s, idMessung %d\n"), macAddress.c_str(), idMessung);
   lcd.print(PSTR("Connect to WLAN"));
   Serial.print(PSTR("\nWLAN connect to:"));
   Serial.print("FRITZ!Box Fon WLAN 7390");
@@ -422,14 +543,18 @@ void setup(){ // Einmalige Initialisierung
   Wire.setClockStretchLimit(200000L);// CO2-SCD30
 
   String antwort;
- // httpGET(PSTR("co2.rainer-gerhards.de"), PSTR("/tools/co2_sensor_log.php?msg=BOOTED,+init+complete,+IP+")+ WiFi.localIP().toString(), antwort,80 );
+  //rst_info* rinfo = ESP.getResetInfoPtr();
+  struct bootflags bflags = bootmode_detect();
   httpGET(PSTR("co2.rainer-gerhards.de"), PSTR("/tools/co2_sensor_boot.php?sn=") + String(serialNumber)
-    + String("&ip=" )+ WiFi.localIP().toString(), antwort, 80);
+    + String("&ip=" )+ WiFi.localIP().toString() 
+    + String("&rstcause=" ) + String(bflags.raw_rst_cause), 
+    antwort, 80);
 
-  for(uint16_t i = 0 ; i < NUM_READINGS ; ++i) {
-    co2Readings[i] = 0;
-  }
+  #if GROVE_LCD == 0
   lcd.noBacklight();
+  #endif
+  time_t curr = time(NULL);
+  nextReporting = curr - curr % 30 + 30; // TODO: +60
 }
 
 
@@ -445,51 +570,52 @@ doReset(const char *message) {
 }
 
 
+static void readCO2(void) {
+  //Serial.printf_P(PSTR("\nnew loop at %s, free heap %d\n"), String(currReading).c_str(), ESP.getFreeHeap());
 
-void loop() { // Kontinuierliche Wiederholung 
-  static uint16_t useSum = 0;
-  while((time(&currReading) % 5) != 0) {
-    doIdleTasks();
-    delay(5);
-  }
-  Serial.printf_P(PSTR("\nnew loop at %s\n"), String(currReading).c_str());
-
+  time_t t_to = time(NULL);
+  /*
   if(!airSensorSCD30.dataAvailable()) {
-    Serial.print(PSTR("Wait for sensor data "));
-    time_t t_to = time(NULL) + 5;
+    Serial.printf_P(PSTR("Wait for sensor data, start %d "), t_to);
+    lcd.setCursor(12,1);
+    lcd.print(PSTR("WCO2"));
     while(!airSensorSCD30.dataAvailable()) {
-      lcd.setCursor(12,1);
       doIdleTasks();
-      lcd.print(PSTR("WCO2"));
       if((millis() % 50) == 0)
         Serial.print('.');
-      if(time(NULL) > t_to) {
-        Serial.println("Sensor Timeout, reboot");
+      if(time(NULL) > t_to + 15) {
+        Serial.printf("Sensor Timeout, reboot, time %d\n", time(NULL));
         doReset(PSTR("REBOOT+(CO2+sensor+stalled)"));
       }
       delay(1);
     }
-    Serial.print(PSTR(" got it! - "));
+    Serial.printf_P(PSTR(" got it (%d seconds)! - "), time(NULL) - t_to);
     lcd.setCursor(12,1);
     lcd.print(PSTR("    "));
   }
+  */
+  currReading = time(NULL);
   co2 = airSensorSCD30.getCO2();
   tempReading = airSensorSCD30.getTemperature() + TEMP_CORRECTION;
   rhReading = airSensorSCD30.getHumidity();
 
-  Serial.println("re-init display value " + String(currReading % DISP_REINIT_INTERVAL));
 
-  if(currReading % DISP_REINIT_INTERVAL == 5) {
-    Serial.println(PSTR("re-init display"));
-    lcd.init(); // display sometimes garbled - fix it "after the fact" -- workaround
+  // TODO: Move to its own (LCD) function
+  #if GROVE_LCD == 0
+    Serial.println("re-init display value " + String(currReading % DISP_REINIT_INTERVAL));
+    if(currReading % DISP_REINIT_INTERVAL == 5) {
+      Serial.println(PSTR("re-init display"));
+      lcd.init(); // display sometimes garbled - fix it "after the fact" -- workaround
+    }
+  #endif
+
+  // we limit the number of readings just as a safety measure - the array should
+  // always be large enough to contain all readings
+  if(iReadings < NUM_READINGS) {
+    co2Readings[iReadings++] = co2;
   }
-  
-  co2Readings[iReadings] = co2;
-  if (++iReadings == NUM_READINGS) {
-    iReadings = 0;
-    useSum = 1;
-  }
-    
+
+  // TODO: check timeou handling
   if(tempReading == lastTempReading) {
     if(currReading >= lastReading + 120) {
       doReset(PSTR("REBOOT+(stalled)"));
@@ -498,75 +624,34 @@ void loop() { // Kontinuierliche Wiederholung
     lastTempReading = tempReading;
     //if(lastReading == 0) //debug force-reset
     lastReading = currReading;
-    Serial.println("Updated last reading, now " + String(lastTempReading) + " at " + String(lastReading));
+    //Serial.println("Updated last reading, now " + String(lastTempReading) + " at " + String(lastReading));
   }
 
   lcd.setCursor(12,1);
-  lcd.print(String(30 - (currReading % 30)) + " ");
+  lcd.print(String(nextReporting - time(NULL)) + " ");
   
-  Serial.print("CO2="+String(String(co2)));
-  Serial.print(PSTR("ppm Kalibrieren: Frischluft, Einschwingen abwarten und \"Cal\" eingeben <Return>"));
-  Serial.println();
-  if (( ( Serial.available() ) > ( 1 ) ))
-  {
-    JaNeinAbfrage = "Text" ;
-    Eingabe = SerialReadEndless("Eingabe=") ;
-    if (( ( ( Antwort ) == ( "j" ) ) || ( ( Antwort ) == ( "J" ) ) )){
-      Serial.println("Frischluft kalibriert");
-      // Forced Calibration Sensirion SCD 30
-      Serial.print(PSTR("Start SCD 30 calibration, please wait 20 s ..."));delay(20000);
-      airSensorSCD30.setAltitudeCompensation(300); // Altitude in m ü NN 
-      airSensorSCD30.setForcedRecalibrationFactor(400); // fresh air 
-      Serial.println(PSTR(" done"));
-      }
-  }
-  
-  /*if (doCal) {
-     CO2_Kalibrierfunktion(); // Kalibrierfunktion aufrufen 
-     doCal=0; 
-  }  
-  */
-  if (showLED) {
-    showleds();
-    //WSGauge(co2,800, 1200,100,10,true);
-  }
+  Serial.println("CO2="+String(String(co2)));
+  showLEDs();
   lcd.setCursor(0,0);
   lcd.print(String("CO2:"+String(co2))+"                ");
   lcd.setCursor(0,1);
   lcd.print(String(PSTR("C:")+String(tempReading)+"     ")); // +String(NTPtime()))+"                ");
 
-  if((currReading % 30) == 0) {
-    uint16_t co2Median = co2;
-    if(useSum) {
-      sort(co2Readings, co2Readings + NUM_READINGS);
-      co2Median = (co2Readings[2]+co2Readings[3]) * 10 / 2;   // this only works for 6 readings!     
-      if(co2Median % 10 >= 5) {
-        co2Median += 10;
-      }
-      co2Median = co2Median / 10;
-      iReadings = 0;
+  reportReading();
+}
 
-      lcd.setCursor(12,0);
-      lcd.print(String(co2Median));
-    }
-    
-    lcd.setCursor(12,1);
-    lcd.print(PSTR("WEB "));
-    String antwort;
-    httpGET(PSTR("co2.rainer-gerhards.de"), PSTR("/tools/co2_accept.php?id=1000&co2=")
-      + String(co2Median)
-      + PSTR("&tm=") + String(currReading)
-      + PSTR("&te=") + String(tempReading)
-      + PSTR("&rh=") + String(rhReading)
-      + PSTR("&at=4711"), antwort,80 );
-    lcd.setCursor(12,1);
-    lcd.print(PSTR("    "));
-    Serial.println(PSTR("reported sensor data to server"));  
-  }
 
-  //ensure one second later
-  while(time(NULL) == currReading) {
-    doIdleTasks();
-    delay(5);
+
+void loop() { // Kontinuierliche Wiederholung 
+  if(airSensorSCD30.dataAvailable()) {
+    readCO2();
+    showLEDs();
+    lcd.setCursor(0,0);
+    lcd.print(String("CO2:"+String(co2))+"                ");
+    lcd.setCursor(0,1);
+    lcd.print(String(PSTR("C:")+String(tempReading)+"     ")); // +String(NTPtime()))+"                ");
+
+    reportReading();
   }
+  server.handleClient(); //Homepageanfragen versorgen
 }
