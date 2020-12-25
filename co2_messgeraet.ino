@@ -188,6 +188,7 @@ void serverSendFigure(){
      String val = String("<h1>")+String(nam)+String(": ")+String(mess)+String(" ")+unit+ String("</h1>");
      server.sendContent(val);
  }
+ 
 //------------------------------ Server Unterprogramm zur Bearbeitung der Anfragen
 void serverHomepage() { 
   if (server.hasArg(PSTR("backlight-on"))) {
@@ -230,7 +231,47 @@ void serverHomepage() {
  }
  server.sendContent(INDEX_HTML_END);
 }
-//--------------------------------------- HTTP-Get
+
+
+//------------------------------ Server Hompage html-Code
+const char PROGMEM ADMIN_HTML_START[] =
+ "<!DOCTYPE HTML>"
+  "<html>"
+   "<head>"
+   "<meta name = \"viewport\" content = \"width = device-width, initial-scale = 1.0, maximum-scale = 1.0, user-scalable=0\">"
+     "<title>CO2 Sensor Admin Page</title>"
+   "</head>"
+    "<body>"
+    "<CENTER>";
+ 
+
+void serverAdminpage() { 
+  if (server.hasArg("message")) {// Wenn Kalibrierpasswort eingetroffen,
+    String input = server.arg("message");     // dann Text vom Client einlesen
+    if (input == cal_passwort){
+      cal_message = "do calibration (20 s wait)";
+      doCal = 1;
+    } else
+      cal_message = "wrong password";
+    } else cal_message = "";
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send ( 200, "text/html", ADMIN_HTML_START);
+  if (cal_passwort != "your password") {
+  server.sendContent(PSTR("<FORM action=\"/admin\" method=\"post\">"
+     "<P>"
+     "Password: "
+     "<INPUT type=\"text\" name=\"message\"><br>"));
+  server.sendContent(PSTR("<INPUT type=\"text\" name=\"repintv\" value=\"") + String(reportingInterval) + PSTR("\">"));
+  server.sendContent(PSTR("<INPUT type=\"submit\" value=\"Calibrate\">"
+     "</P>"
+     "</FORM>" 
+    ));
+  server.sendContent(cal_message);
+  }
+  server.sendContent(INDEX_HTML_END);
+}
+
+
 int httpGET(String host, String cmd, String &antwort, int Port) {
   std::unique_ptr<BearSSL::WiFiClientSecure>client(new BearSSL::WiFiClientSecure);
   HTTPClient http;
@@ -485,6 +526,7 @@ void setup(){ // Einmalige Initialisierung
   airSensorSCD30.setMeasurementInterval(measurementInterval);     // CO2-Messung alle 5 s
   //------------ HTML-Server initialisieren
   server.on("/", serverHomepage);
+  server.on("/admin", serverAdminpage);
   server.begin();// Server starten
 //  WSpixels.begin();//-------------- Initialisierung Neopixel
   
