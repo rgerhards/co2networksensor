@@ -37,7 +37,7 @@ using namespace std;
 #define DEFAULT_WIFI_CONNECT_TIMEOUT 1000
 int16_t showLED = 1;
 
-uint8_t reportingInterval = 20;
+uint8_t reportingInterval = 30;
 uint8_t measurementInterval = 2; // 2sec is default and should be changed with caution
 const int red_led = 14;
 const int yellow_led = 13;
@@ -441,6 +441,7 @@ void Calibrate_code_Sample(void) {
 
 
 void reportReading(void) {
+  static int nReading = 0;
   if(time(NULL) >= nextReporting) {
     nextReporting += reportingInterval;
     uint16_t co2Median = co2;
@@ -484,6 +485,17 @@ void reportReading(void) {
 
     lcd.setCursor(12,1);
     lcd.print(PSTR("    "));
+    if(nReading++ == 50) {
+      nReading = 0;
+      if(measurementInterval == 2) 
+        measurementInterval = 3;
+      else if(measurementInterval == 3) 
+        measurementInterval = 5;
+      else
+        measurementInterval = 2;
+      Serial.printf("NEW Interval %d\n", measurementInterval);
+      airSensorSCD30.setMeasurementInterval(measurementInterval);     // CO2-Messung alle 5 s
+    }
   }
 }
 
@@ -679,6 +691,7 @@ static void readCO2(void) {
 
 
 void loop() { // Kontinuierliche Wiederholung 
+  wifiConnect();
   if(airSensorSCD30.dataAvailable()) {
     readCO2();
     showLEDs();
